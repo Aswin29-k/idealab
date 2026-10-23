@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+backend/.env
+**/.env
+**/.env.*
+!**/.env.example
+backend/node_modules/
