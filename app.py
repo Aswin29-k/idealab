@@ -856,8 +856,21 @@ def submit_email_request(
     payload: dict[str, object], endpoint: str, request_label: str
 ) -> tuple[bool, str]:
     api_base_url = os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip().rstrip("/")
+    is_production = (
+        os.environ.get("RENDER", "").strip().lower() == "true"
+        or bool(os.environ.get("RENDER_EXTERNAL_URL", "").strip())
+        or os.environ.get("NODE_ENV", "").strip().lower() == "production"
+        or os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}
+    )
     if not api_base_url:
-        return False, f"{request_label} not sent: the email API URL is not configured."
+        if is_production:
+            return (
+                False,
+                f"{request_label} not sent: IDEA_LAB_CONTACT_API_URL is not set. "
+                "Configure it in the Streamlit frontend service with the public "
+                "base URL of your deployed email backend.",
+            )
+        api_base_url = "http://localhost:5000"
 
     request = Request(
         f"{api_base_url}{endpoint}",

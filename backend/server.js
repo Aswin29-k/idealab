@@ -7,6 +7,14 @@ const nodemailer = require("nodemailer");
 
 const app = express();
 const port = Number(process.env.PORT || 5000);
+const isProduction =
+  ["production", "prod"].includes(
+    (process.env.NODE_ENV || "").trim().toLowerCase(),
+  ) ||
+  (process.env.RENDER || "").trim().toLowerCase() === "true" ||
+  ["production", "prod"].includes(
+    (process.env.APP_ENV || "").trim().toLowerCase(),
+  );
 const receiverEmail = (process.env.RECEIVER_EMAIL || "").trim();
 const emailUser = (process.env.EMAIL_USER || "").trim();
 const emailPassword = (process.env.EMAIL_PASS || "").trim();
@@ -38,7 +46,7 @@ const allowedOrigins = process.env.FRONTEND_ORIGIN
   ? process.env.FRONTEND_ORIGIN.split(",")
       .map((origin) => origin.trim())
       .filter(Boolean)
-  : process.env.NODE_ENV === "production"
+  : isProduction
     ? []
     : ["http://localhost:8501"];
 const submissions = new Map();
@@ -50,7 +58,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   process.exit(1);
 }
 
-if (process.env.NODE_ENV === "production" && allowedOrigins.length === 0) {
+if (isProduction && allowedOrigins.length === 0) {
   console.error("FRONTEND_ORIGIN must be configured in production.");
   process.exit(1);
 }
