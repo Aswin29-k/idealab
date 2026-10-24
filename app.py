@@ -6,8 +6,10 @@ import re
 import socket
 from datetime import date, timedelta
 from html import escape
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -31,6 +33,7 @@ NAV_ITEMS = (
 )
 MENTOR_PHOTO_DIR = Path(__file__).parent / "assets" / "mentors"
 COLLEGE_LOGO_PATH = Path(__file__).parent / "assets" / "care-college-logo.png"
+IDEA_LAB_LOGO_PATH = Path(__file__).parent / "assets" / "aicte-idea-lab-logo.png"
 TECH_GURUS = (
     (
         "Mr. R Saravanan",
@@ -240,8 +243,13 @@ def render_home() -> None:
         )
         st.badge("Student innovation space", icon=":material/lightbulb:")
     with hero_right:
-        st.html(HERO_ILLUSTRATION)
-        st.caption("Illustrative graphic — not a photograph of the lab.")
+        with st.container(border=True, key="hero-logo-card"):
+            st.image(
+                str(IDEA_LAB_LOGO_PATH),
+                alt="AICTE and IDEA Lab logos",
+                width="stretch",
+            )
+            st.caption("AICTE IDEA Lab")
 
     st.space("large")
     st.header("From curiosity to prototype")
@@ -489,6 +497,35 @@ def render_programs() -> None:
         }
         main [data-testid="stImage"]:hover img {
             transform: scale(1.018);
+        }
+        .st-key-hero-logo-card {
+            height: 100%;
+            min-height: 20rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 1.25rem;
+            border-color: var(--idea-border);
+            border-radius: 1rem;
+            background: linear-gradient(145deg, var(--idea-white), var(--idea-light-blue));
+            box-shadow: 0 5px 18px rgba(18, 59, 99, 0.055);
+            transition: transform 220ms ease, box-shadow 220ms ease,
+                border-color 220ms ease;
+        }
+        .st-key-hero-logo-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(39, 137, 201, 0.38);
+            box-shadow: 0 10px 26px rgba(18, 59, 99, 0.1);
+        }
+        .st-key-hero-logo-card [data-testid="stImage"] img {
+            width: auto;
+            max-width: 100%;
+            max-height: 15rem;
+            margin: 0 auto;
+            object-fit: contain;
+        }
+        .st-key-hero-logo-card [data-testid="stCaptionContainer"] {
+            text-align: center;
         }
         main [data-testid="stTextInput"] input,
         main [data-testid="stNumberInput"] input,
@@ -886,7 +923,13 @@ def submit_email_request(
             )
 
     full_url = f"{api_base_url}{endpoint}"
-    if not api_base_url.startswith(("http://", "https://")):
+    parsed_base_url = urlparse(api_base_url)
+    if (
+        parsed_base_url.scheme not in {"http", "https"}
+        or not parsed_base_url.netloc
+        or parsed_base_url.username is not None
+        or parsed_base_url.password is not None
+    ):
         return (
             False,
             f"{request_label} not sent: IDEA_LAB_CONTACT_API_URL must be a full HTTP(S) base URL, "
@@ -903,10 +946,39 @@ def submit_email_request(
         with urlopen(request, timeout=20) as response:
             response_body = response.read().decode("utf-8")
     except HTTPError as error:
-        response_body = error.read().decode("utf-8", errors="replace")
+        try:
+            response_body = error.read().decode("utf-8", errors="replace")
+        except (TimeoutError, socket.timeout):
+            return (
+                False,
+                f"{request_label} received HTTP {error.code}, but the backend "
+                "response timed out while reading it. Check backend logs before "
+                "retrying; the submission identifier is reused to avoid duplicates.",
+            )
+        except HTTPException:
+            return (
+                False,
+                f"{request_label} received HTTP {error.code}, but the backend "
+                "returned an incomplete response.",
+            )
+        except OSError:
+            return (
+                False,
+                f"{request_label} received HTTP {error.code}, but the backend "
+                "connection failed while reading the response.",
+            )
         try:
             body = json.loads(response_body)
         except json.JSONDecodeError:
+            if error.code == 405:
+                return (
+                    False,
+                    "The configured email backend returned HTTP 405 to POST. "
+                    "Confirm IDEA_LAB_CONTACT_API_URL is the public base URL of "
+                    "the Node.js backend service, not the Streamlit frontend, and "
+                    "does not include an API path. The request must reach "
+                    "POST /api/contact.",
+                )
             if error.code == 502:
                 return (
                     False,
@@ -926,6 +998,13 @@ def submit_email_request(
         if isinstance(body, dict) and isinstance(body.get("message"), str):
             return False, f"{body['message']} (HTTP {error.code})."
         return False, f"The email backend returned HTTP {error.code}."
+    except (TimeoutError, socket.timeout):
+        return (
+            False,
+            f"{request_label} timed out while waiting for the email backend. "
+            "The submission identifier is retained to prevent duplicate emails; "
+            "check the backend health endpoint and Render logs before trying again.",
+        )
     except URLError as error:
         if isinstance(error.reason, ConnectionRefusedError):
             return (
@@ -953,6 +1032,17 @@ def submit_email_request(
             "The email backend could not be reached. Check that it is running and "
             "that IDEA_LAB_CONTACT_API_URL is reachable from the Streamlit server.",
         )
+    except HTTPException:
+        return (
+            False,
+            f"{request_label} not confirmed: the email backend returned an incomplete response.",
+        )
+    except OSError:
+        return (
+            False,
+            f"{request_label} not confirmed because the email backend connection failed. "
+            "Check the backend URL and Render logs.",
+        )
     except UnicodeDecodeError:
         return (
             False,
@@ -973,45 +1063,6 @@ def submit_email_request(
     if isinstance(body, dict) and isinstance(body.get("message"), str):
         return False, body["message"]
     return False, f"{request_label} not sent: the email service returned an error."
-
-
-HERO_ILLUSTRATION = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 430" role="img" aria-label="Illustration of a connected engineering prototype with circuit paths">
-<defs>
-  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#0b1f3a"/>
-    <stop offset="1" stop-color="#123b5d"/>
-  </linearGradient>
-  <linearGradient id="board" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#155879"/>
-    <stop offset="1" stop-color="#123c61"/>
-  </linearGradient>
-</defs>
-<rect width="640" height="430" rx="28" fill="url(#bg)"/>
-<circle cx="505" cy="86" r="54" fill="#11c5d9" opacity=".08"/>
-<circle cx="505" cy="86" r="35" fill="none" stroke="#61e3ef" stroke-opacity=".4"/>
-<path d="M52 344h536" stroke="#7edfea" stroke-opacity=".18"/>
-<g fill="none" stroke="#36d2df" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M75 112h91l26 25v35h62m-87 77h-39l-22 22H82" stroke-width="3" opacity=".8"/>
-  <path d="M431 105h72v62h-33l-32 32v51h-48" stroke-width="3" opacity=".75"/>
-  <path d="M93 299h45m277 0h92m-218-170v36" stroke-width="3" opacity=".55"/>
-</g>
-<g fill="#62e4ee">
-  <circle cx="75" cy="112" r="5"/><circle cx="82" cy="271" r="5"/>
-  <circle cx="503" cy="105" r="5"/><circle cx="457" cy="299" r="5"/>
-  <circle cx="167" cy="112" r="4"/><circle cx="507" cy="299" r="4"/>
-</g>
-<path d="m320 90 142 82v145l-142 82-142-82V172z" fill="url(#board)" stroke="#6ce5ed" stroke-opacity=".8" stroke-width="2"/>
-<path d="m320 121 114 66v116l-114 66-114-66V187z" fill="#0c2948" stroke="#32cbdc" stroke-opacity=".65"/>
-<path d="m320 151 84 49v70l-84 49-84-49v-70z" fill="#114568" stroke="#73e3eb" stroke-width="2"/>
-<circle cx="320" cy="235" r="45" fill="#0b213c" stroke="#7cecf0" stroke-width="2"/>
-<path d="M292 236h20l13-19 14 37 12-18h17" fill="none" stroke="#7cecf0" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-<g fill="#a2f5f3">
-  <circle cx="320" cy="121" r="5"/><circle cx="434" cy="187" r="5"/>
-  <circle cx="434" cy="303" r="5"/><circle cx="320" cy="369" r="5"/>
-  <circle cx="206" cy="303" r="5"/><circle cx="206" cy="187" r="5"/>
-</g>
-<text x="320" y="414" text-anchor="middle" fill="#b8e7ef" font-family="Arial,sans-serif" font-size="13" letter-spacing="3">IDEAS INTO ENGINEERING</text>
-</svg>"""
 
 
 st.markdown(
