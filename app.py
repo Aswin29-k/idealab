@@ -852,30 +852,51 @@ def render_contact() -> None:
                 st.error(result_message)
 
 
+def resolve_api_base_url() -> str:
+    raw_url = os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip()
+    if not raw_url:
+        return "http://localhost:5000"
+
+    normalized = raw_url.rstrip("/")
+    for suffix in ("/api/contact", "/api/rental-request", "/api"):
+        if normalized.lower().endswith(suffix.lower()):
+            normalized = normalized[: -len(suffix)]
+            break
+    return normalized
+
+
 def submit_email_request(
     payload: dict[str, object], endpoint: str, request_label: str
 ) -> tuple[bool, str]:
-    api_base_url = os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip().rstrip("/")
     is_production = (
         os.environ.get("RENDER", "").strip().lower() == "true"
         or bool(os.environ.get("RENDER_EXTERNAL_URL", "").strip())
         or os.environ.get("NODE_ENV", "").strip().lower() == "production"
         or os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}
     )
-    if not api_base_url:
+    api_base_url = resolve_api_base_url()
+    if not os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip():
         if is_production:
             return (
                 False,
                 f"{request_label} not sent: IDEA_LAB_CONTACT_API_URL is not set. "
                 "Configure it in the Streamlit frontend service with the public "
-                "base URL of your deployed email backend.",
+                "base URL of your deployed email backend (for example, "
+                "https://your-render-service.onrender.com). Do not include /api/contact.",
             )
-        api_base_url = "http://localhost:5000"
+
+    full_url = f"{api_base_url}{endpoint}"
+    if not api_base_url.startswith(("http://", "https://")):
+        return (
+            False,
+            f"{request_label} not sent: IDEA_LAB_CONTACT_API_URL must be a full HTTP(S) base URL, "
+            "not a relative path. Example: https://your-render-service.onrender.com",
+        )
 
     request = Request(
-        f"{api_base_url}{endpoint}",
+        full_url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
     try:
