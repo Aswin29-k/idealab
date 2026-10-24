@@ -12,7 +12,7 @@ const serverPath = path.join(backendDirectory, "server.js");
 const mockPath = path.join(
   backendDirectory,
   "test-support",
-  "mock-nodemailer.js",
+  "mock-email-provider.js",
 );
 
 async function unusedPort() {
@@ -43,11 +43,11 @@ async function startBackend(mode) {
       RENDER: "false",
       APP_ENV: "test",
       FRONTEND_ORIGIN: "http://localhost:8501",
-      EMAIL_USER: "test-sender@mock.test",
-      EMAIL_PASS: "test-only-password",
+      RESEND_API_KEY: "re_test-key",
+      EMAIL_FROM: "IDEA Lab <sender@mock.test>",
       RECEIVER_EMAIL: "test-receiver@mock.test",
-      TEST_SMTP_MODE: mode,
-      TEST_SMTP_SEND_COUNT: sendCountPath,
+      TEST_PROVIDER_MODE: mode,
+      TEST_PROVIDER_SEND_COUNT: sendCountPath,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -66,13 +66,15 @@ async function startBackend(mode) {
       try {
         const response = await fetch(`${baseUrl}/health`);
         const health = await response.json();
-        const expectedStatus =
-          mode === "verify-auth" ? "authentication_failed" : "ready";
+        const expectedStatus = "configured";
         if (response.ok && health.emailTransportStatus === expectedStatus) {
           return {
             baseUrl,
             child,
             sendCountPath,
+            get output() {
+              return output;
+            },
             async close() {
               child.kill();
               await new Promise((resolve) => child.once("exit", resolve));
@@ -112,7 +114,7 @@ async function postContact(baseUrl, payload = contactPayload()) {
   return { status: response.status, body: await response.json() };
 }
 
-test("health endpoint returns JSON and reports SMTP state", async () => {
+test("health endpoint returns immediately without claiming an unverified provider is ready", async () => {
   const backend = await startBackend("success");
   try {
     const response = await fetch(`${backend.baseUrl}/health`);
@@ -120,37 +122,102 @@ test("health endpoint returns JSON and reports SMTP state", async () => {
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /application\/json/);
     assert.equal(body.ok, true);
-    assert.equal(body.emailTransportStatus, "ready");
+    assert.equal(body.emailProvider, "resend");
+    assert.equal(body.emailTransportStatus, "configured");
+    assert.equal(body.emailTransportFailureCode, null);
+    assert.equal(body.emailTransportFailureStage, null);
+    assert.deepEqual(Object.keys(body.smtpConnectivity).sort(), [
+      "dns",
+      "port465",
+      "port587",
+    ]);
   } finally {
     await backend.close();
   }
 });
 
-test("contact endpoint returns success only after SMTP accepts the message", async () => {
+test("contact endpoint preserves email content and uses provider idempotency", async () => {
   const backend = await startBackend("success");
   try {
     const result = await postContact(backend.baseUrl);
     assert.equal(result.status, 200);
     assert.equal(result.body.ok, true);
-    assert.equal(fs.readFileSync(backend.sendCountPath, "utf8").trim(), "send");
+    const sent = JSON.parse(
+      fs.readFileSync(backend.sendCountPath, "utf8").trim(),
+    );
+    assert.equal(sent.idempotencyKey, "contact/1234567890abcdef1234567890abcdef");
+    assert.equal(sent.body.from, "IDEA Lab <sender@mock.test>");
+    assert.deepEqual(sent.body.to, ["test-receiver@mock.test"]);
+    assert.equal(sent.body.reply_to, "sender@mock.test");
+    assert.equal(sent.body.subject, "IDEA Lab contact: Automated contact test");
+    assert.match(sent.body.text, /This message is sent only to a mocked SMTP transport\./);
   } finally {
     await backend.close();
   }
 });
 
-test("SMTP authentication failure returns a JSON 503", async () => {
-  const backend = await startBackend("verify-auth");
+test("rental requests retain their email content and use a distinct idempotency key", async () => {
+  const backend = await startBackend("success");
+  try {
+    const response = await fetch(`${backend.baseUrl}/api/rental-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        submissionId: "abcdef1234567890abcdef1234567890",
+        name: "Test Renter",
+        department: "Engineering",
+        contact: "renter@mock.test",
+        item: "Oscilloscope",
+        quantity: 2,
+        requiredDate: "2030-01-10",
+        returnDate: "2030-01-12",
+        purpose: "Test rental request message.",
+      }),
+    });
+    assert.equal(response.status, 200);
+    const sent = JSON.parse(
+      fs.readFileSync(backend.sendCountPath, "utf8").trim(),
+    );
+    assert.equal(
+      sent.idempotencyKey,
+      "rental-request/abcdef1234567890abcdef1234567890",
+    );
+    assert.equal(sent.body.subject, "IDEA Lab rental request: Oscilloscope");
+    assert.match(sent.body.text, /Test rental request message\./);
+    assert.match(sent.body.text, /pending administrator confirmation/);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("provider send authentication failure returns a JSON 503", async () => {
+  const backend = await startBackend("send-auth");
   try {
     const result = await postContact(backend.baseUrl);
     assert.equal(result.status, 503);
     assert.equal(result.body.ok, false);
     assert.match(result.body.message, /rejected the server credentials/);
+    const sent = JSON.parse(
+      fs.readFileSync(backend.sendCountPath, "utf8").trim(),
+    );
+    assert.equal(sent.idempotencyKey, "contact/1234567890abcdef1234567890abcdef");
+    await delay(50);
+    assert.match(backend.output, /category=authentication/);
+    assert.match(backend.output, /Email provider send failed/);
+    assert.doesNotMatch(backend.output, /re_test-key/);
+    assert.doesNotMatch(backend.output, /Automated contact test/);
+    assert.doesNotMatch(backend.output, /mocked SMTP transport/);
+
+    const healthResponse = await fetch(`${backend.baseUrl}/health`);
+    const health = await healthResponse.json();
+    assert.equal(health.emailTransportFailureCode, "EAUTH");
+    assert.equal(health.emailTransportFailureStage, "send");
   } finally {
     await backend.close();
   }
 });
 
-test("SMTP timeout returns JSON 504 and retrying the same ID does not resend", async () => {
+test("provider timeout returns JSON 504 and retrying the same ID does not resend", async () => {
   const backend = await startBackend("timeout");
   try {
     const payload = contactPayload();
@@ -158,11 +225,16 @@ test("SMTP timeout returns JSON 504 and retrying the same ID does not resend", a
     const second = await postContact(backend.baseUrl, payload);
     assert.equal(first.status, 504);
     assert.equal(first.body.ok, false);
+    assert.match(first.body.message, /Resend dashboard/);
     assert.equal(second.status, 504);
     assert.equal(
       fs.readFileSync(backend.sendCountPath, "utf8").trim().split("\n").length,
       1,
     );
+    const healthResponse = await fetch(`${backend.baseUrl}/health`);
+    const health = await healthResponse.json();
+    assert.equal(health.emailTransportFailureCode, "ETIMEDOUT");
+    assert.equal(health.emailTransportFailureStage, "send");
   } finally {
     await backend.close();
   }

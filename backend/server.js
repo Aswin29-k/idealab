@@ -3,7 +3,8 @@ require("dotenv").config({ path: require("node:path").join(__dirname, ".env") })
 const cors = require("cors");
 const express = require("express");
 const { rateLimit } = require("express-rate-limit");
-const nodemailer = require("nodemailer");
+const dns = require("node:dns");
+const net = require("node:net");
 
 const app = express();
 const port = Number(process.env.PORT || 5000);
@@ -16,8 +17,8 @@ const isProduction =
     (process.env.APP_ENV || "").trim().toLowerCase(),
   );
 const receiverEmail = (process.env.RECEIVER_EMAIL || "").trim();
-const emailUser = (process.env.EMAIL_USER || "").trim();
-const emailPassword = (process.env.EMAIL_PASS || "").trim();
+const resendApiKey = (process.env.RESEND_API_KEY || "").trim();
+const emailFrom = (process.env.EMAIL_FROM || "").trim();
 
 function isEmailAddress(value) {
   return (
@@ -32,11 +33,12 @@ function isPlaceholderSecret(value) {
 }
 
 const missingEmailConfiguration = [];
-if (!isEmailAddress(emailUser)) {
-  missingEmailConfiguration.push("EMAIL_USER");
+if (!resendApiKey || isPlaceholderSecret(resendApiKey)) {
+  missingEmailConfiguration.push("RESEND_API_KEY");
 }
-if (!emailPassword || isPlaceholderSecret(emailPassword)) {
-  missingEmailConfiguration.push("EMAIL_PASS");
+const emailFromAddress = emailFrom.match(/<([^<>]+)>/)?.[1] || emailFrom;
+if (!isEmailAddress(emailFromAddress)) {
+  missingEmailConfiguration.push("EMAIL_FROM");
 }
 if (!isEmailAddress(receiverEmail)) {
   missingEmailConfiguration.push("RECEIVER_EMAIL");
@@ -50,8 +52,15 @@ const allowedOrigins = process.env.FRONTEND_ORIGIN
     ? []
     : ["http://localhost:8501"];
 const submissions = new Map();
-const submissionTtlMs = 30 * 60 * 1000;
-let emailTransportStatus = emailConfigured ? "checking" : "not_configured";
+const submissionTtlMs = 24 * 60 * 60 * 1000;
+let emailTransportStatus = emailConfigured ? "configured" : "not_configured";
+let emailTransportFailureCode = null;
+let emailTransportFailureStage = null;
+const smtpConnectivity = {
+  dns: { status: "checking" },
+  port465: { status: "checking" },
+  port587: { status: "checking" },
+};
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error("PORT must be an integer between 1 and 65535.");
@@ -67,63 +76,116 @@ if (process.env.TRUST_PROXY === "1") {
   app.set("trust proxy", 1);
 }
 
-const transporter = emailConfigured
-  ? nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      connectionTimeout: 5000,
-      greetingTimeout: 5000,
-      socketTimeout: 8000,
-      tls: {
-        minVersion: "TLSv1.2",
-      },
-      auth: {
-        user: emailUser,
-        pass: emailPassword,
-      },
-    })
-  : null;
-let emailTransportFailureCode = null;
-
 function logMailTransportFailure(stage, error) {
   const code = typeof error?.code === "string" ? error.code : "unknown";
-  const responseCode = Number.isInteger(error?.responseCode)
-    ? ` responseCode=${error.responseCode}`
-    : "";
-  const command =
-    typeof error?.command === "string" && /^[A-Z ]{1,24}$/i.test(error.command)
-      ? ` command=${error.command}`
-      : "";
-  let safeMessage = String(error?.message || "Unknown SMTP error")
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]");
-  for (const secret of new Set([emailPassword, emailUser, receiverEmail])) {
-    if (secret) {
-      safeMessage = safeMessage.replaceAll(secret, "[redacted]");
-    }
-  }
-  safeMessage = safeMessage.slice(0, 300);
+  const category = isEmailAuthenticationFailure(error)
+    ? "authentication"
+    : isEmailTimeoutFailure(error)
+      ? "timeout"
+      : code === "ECONNECTION" || code === "EDNS"
+        ? "connection"
+        : "provider";
   console.error(
-    `Email transport ${stage} failed (code=${code}${responseCode}${command}): ${safeMessage}`,
+    `Email provider ${stage} failed (provider=resend category=${category} code=${code}).`,
   );
 }
 
 function isEmailAuthenticationFailure(error) {
-  return (
-    error?.code === "EAUTH" ||
-    error?.responseCode === 534 ||
-    error?.responseCode === 535
-  );
+  return error?.code === "EAUTH";
 }
 
 function isEmailTimeoutFailure(error) {
-  return (
-    error?.code === "ETIMEDOUT" ||
-    error?.code === "ESOCKET" ||
-    (error?.code === "ECONNECTION" &&
-      /timed?\s*out|timeout/i.test(String(error?.message || "")))
-  );
+  return error?.code === "ETIMEDOUT";
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      const responseError = new Error("Email provider returned invalid JSON.");
+      responseError.code = "INVALID_PROVIDER_RESPONSE";
+      throw responseError;
+    }
+    return { response, body };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error("Email provider request timed out.");
+      timeoutError.code = "ETIMEDOUT";
+      throw timeoutError;
+    }
+    if (typeof error?.code === "string") {
+      throw error;
+    }
+    const connectionError = new Error("Email provider connection failed.");
+    connectionError.code = "ECONNECTION";
+    throw connectionError;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function probeSmtpPort(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "smtp.gmail.com", port });
+    const timer = setTimeout(() => {
+      finish({ status: "timeout", code: "ETIMEDOUT" });
+    }, 3000);
+    let settled = false;
+
+    function finish(result) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    }
+
+    socket.once("connect", () => finish({ status: "connected" }));
+    socket.once("error", (error) =>
+      finish({
+        status: "failed",
+        code: typeof error.code === "string" ? error.code : "unknown",
+      }),
+    );
+  });
+}
+
+function checkSmtpConnectivity() {
+  const dnsTimer = setTimeout(() => {
+    smtpConnectivity.dns = { status: "timeout" };
+  }, 3000);
+  dns.lookup("smtp.gmail.com", { all: true }, (error, addresses) => {
+    clearTimeout(dnsTimer);
+    if (error) {
+      smtpConnectivity.dns = {
+        status: "failed",
+        code: typeof error.code === "string" ? error.code : "unknown",
+      };
+      return;
+    }
+    smtpConnectivity.dns = {
+      status: "resolved",
+      addressCount: addresses.length,
+    };
+  });
+
+  probeSmtpPort(465).then((result) => {
+    smtpConnectivity.port465 = result;
+  });
+  probeSmtpPort(587).then((result) => {
+    smtpConnectivity.port587 = result;
+  });
 }
 
 app.use(
@@ -281,12 +343,48 @@ function pruneSubmissions(now) {
   }
 }
 
-async function sendContactEmail(contact) {
+async function sendProviderEmail(idempotencyKey, email) {
+  const { response, body } = await fetchWithTimeout(
+    "https://api.resend.com/emails",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resendApiKey}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify(email),
+    },
+    8000,
+  );
+  if (response.status === 401 || response.status === 403) {
+    const error = new Error("Email provider authentication failed.");
+    error.code = "EAUTH";
+    error.deliveryUncertain = false;
+    throw error;
+  }
+  if (!response.ok) {
+    const error = new Error("Email provider rejected the message.");
+    error.code = `HTTP_${response.status}`;
+    error.deliveryUncertain =
+      response.status < 500 &&
+      response.status !== 408 &&
+      response.status !== 409;
+    throw error;
+  }
+  if (typeof body?.id !== "string" || !body.id) {
+    const error = new Error("Email provider did not confirm message acceptance.");
+    error.code = "INVALID_PROVIDER_RESPONSE";
+    throw error;
+  }
+}
+
+async function sendContactEmail(contact, submissionId) {
   const timestamp = new Date().toISOString();
-  const info = await transporter.sendMail({
-    from: emailUser,
-    to: receiverEmail,
-    replyTo: contact.email,
+  await sendProviderEmail(`contact/${submissionId}`, {
+    from: emailFrom,
+    to: [receiverEmail],
+    reply_to: contact.email,
     subject: `IDEA Lab contact: ${contact.subject}`,
     text: [
       "A new message was submitted through the IDEA Lab contact form.",
@@ -302,24 +400,13 @@ async function sendContactEmail(contact) {
       contact.message,
     ].join("\n"),
   });
-
-  const accepted = Array.isArray(info.accepted)
-    ? info.accepted.some(
-        (address) => String(address).toLowerCase() === receiverEmail.toLowerCase(),
-      )
-    : false;
-  if (!accepted) {
-    const error = new Error("The recipient was not accepted by the mail server.");
-    error.code = "RECIPIENT_NOT_ACCEPTED";
-    throw error;
-  }
 }
 
-async function sendRentalRequestEmail(rentalRequest) {
+async function sendRentalRequestEmail(rentalRequest, submissionId) {
   const timestamp = new Date().toISOString();
-  const info = await transporter.sendMail({
-    from: emailUser,
-    to: receiverEmail,
+  await sendProviderEmail(`rental-request/${submissionId}`, {
+    from: emailFrom,
+    to: [receiverEmail],
     subject: `IDEA Lab rental request: ${rentalRequest.item}`,
     text: [
       "A component or machine rental request was submitted through the IDEA Lab website.",
@@ -339,35 +426,24 @@ async function sendRentalRequestEmail(rentalRequest) {
       "This request is pending administrator confirmation. Availability is not confirmed.",
     ].join("\n"),
   });
-
-  const accepted = Array.isArray(info.accepted)
-    ? info.accepted.some(
-        (address) => String(address).toLowerCase() === receiverEmail.toLowerCase(),
-      )
-    : false;
-  if (!accepted) {
-    const error = new Error("The recipient was not accepted by the mail server.");
-    error.code = "RECIPIENT_NOT_ACCEPTED";
-    throw error;
-  }
 }
 
-async function sendEmailOnce(submissionId, sendEmail) {
+async function sendEmailOnce(submissionKey, sendEmail) {
   const now = Date.now();
   pruneSubmissions(now);
 
-  const existing = submissions.get(submissionId);
+  const existing = submissions.get(submissionKey);
   if (existing) {
     return existing.promise;
   }
 
   const promise = sendEmail().catch((error) => {
-    if (!isEmailTimeoutFailure(error)) {
-      submissions.delete(submissionId);
+    if (error?.deliveryUncertain === false) {
+      submissions.delete(submissionKey);
     }
     throw error;
   });
-  submissions.set(submissionId, {
+  submissions.set(submissionKey, {
     expiresAt: now + submissionTtlMs,
     promise,
   });
@@ -378,12 +454,15 @@ app.get("/health", (_request, response) => {
   response.json({
     ok: true,
     emailConfigured,
-    emailPasswordConfigured: !missingEmailConfiguration.includes("EMAIL_PASS"),
+    emailApiKeyConfigured: !missingEmailConfiguration.includes("RESEND_API_KEY"),
     missingEmailConfiguration,
+    emailProvider: "resend",
     smtpHost: "smtp.gmail.com",
     smtpPort: 465,
+    smtpConnectivity,
     emailTransportStatus,
     emailTransportFailureCode,
+    emailTransportFailureStage,
   });
 });
 
@@ -411,11 +490,17 @@ app.post("/api/contact", contactRateLimit, async (request, response) => {
   }
 
   try {
-    await sendEmailOnce(validated.value.submissionId, () =>
-      sendContactEmail(validated.value),
+    await sendEmailOnce(
+      `contact/${validated.value.submissionId}`,
+      () =>
+        sendContactEmail(
+          validated.value,
+          validated.value.submissionId,
+        ),
     );
     emailTransportStatus = "ready";
     emailTransportFailureCode = null;
+    emailTransportFailureStage = null;
     response.status(200).json({
       ok: true,
       message: "Your message was accepted for sending.",
@@ -427,6 +512,7 @@ app.post("/api/contact", contactRateLimit, async (request, response) => {
       : "unavailable";
     emailTransportFailureCode =
       typeof error?.code === "string" ? error.code : "unknown";
+    emailTransportFailureStage = "send";
     if (isEmailAuthenticationFailure(error)) {
       response.status(503).json({
         ok: false,
@@ -439,7 +525,7 @@ app.post("/api/contact", contactRateLimit, async (request, response) => {
     response.status(timedOut ? 504 : 502).json({
       ok: false,
       message: timedOut
-        ? "The email provider did not confirm the message before timing out. Its delivery status is uncertain; this submission is held temporarily to prevent duplicate emails."
+        ? "The email provider did not confirm the message before timing out. Delivery is uncertain, so this submission will not be retried automatically. Check the Resend dashboard and Render backend logs before deciding whether to submit again."
         : "The email provider could not accept the message. Please try again later.",
     });
   }
@@ -469,11 +555,17 @@ app.post("/api/rental-request", contactRateLimit, async (request, response) => {
   }
 
   try {
-    await sendEmailOnce(validated.value.submissionId, () =>
-      sendRentalRequestEmail(validated.value),
+    await sendEmailOnce(
+      `rental-request/${validated.value.submissionId}`,
+      () =>
+        sendRentalRequestEmail(
+          validated.value,
+          validated.value.submissionId,
+        ),
     );
     emailTransportStatus = "ready";
     emailTransportFailureCode = null;
+    emailTransportFailureStage = null;
     response.status(200).json({
       ok: true,
       message:
@@ -486,6 +578,7 @@ app.post("/api/rental-request", contactRateLimit, async (request, response) => {
       : "unavailable";
     emailTransportFailureCode =
       typeof error?.code === "string" ? error.code : "unknown";
+    emailTransportFailureStage = "send";
     if (isEmailAuthenticationFailure(error)) {
       response.status(503).json({
         ok: false,
@@ -498,7 +591,7 @@ app.post("/api/rental-request", contactRateLimit, async (request, response) => {
     response.status(timedOut ? 504 : 502).json({
       ok: false,
       message: timedOut
-        ? "The email provider did not confirm the request before timing out. Its delivery status is uncertain; this submission is held temporarily to prevent duplicate emails."
+        ? "The email provider did not confirm the request before timing out. Delivery is uncertain, so this submission will not be retried automatically. Check the Resend dashboard and Render backend logs before deciding whether to submit again."
         : "The email provider could not accept the request. Please try again later.",
     });
   }
@@ -535,27 +628,11 @@ app.use((error, _request, response, next) => {
 
 app.listen(port, "0.0.0.0", () => {
   console.log(`IDEA Lab contact API listening on port ${port}.`);
+  checkSmtpConnectivity();
   if (!emailConfigured) {
-    emailTransportStatus = "not_configured";
     console.warn(
       `Email is not configured. Missing or invalid backend variable(s): ${missingEmailConfiguration.join(", ")}.`,
     );
     return;
   }
-
-  transporter.verify().then(
-    () => {
-      emailTransportStatus = "ready";
-      emailTransportFailureCode = null;
-      console.log("Email transport verification succeeded.");
-    },
-    (error) => {
-      logMailTransportFailure("verification", error);
-      emailTransportStatus = isEmailAuthenticationFailure(error)
-        ? "authentication_failed"
-        : "unavailable";
-      emailTransportFailureCode =
-        typeof error?.code === "string" ? error.code : "unknown";
-    },
-  );
 });

@@ -979,6 +979,15 @@ def submit_email_request(
                     "does not include an API path. The request must reach "
                     "POST /api/contact.",
                 )
+            if error.code == 504:
+                return (
+                    False,
+                    f"{request_label} was not confirmed because the email "
+                    "provider timed out. Delivery may be uncertain. Check the "
+                    "Resend dashboard and backend Render logs before deciding "
+                    "whether to submit again; do not retry "
+                    "until you have checked.",
+                )
             if error.code == 502:
                 return (
                     False,
@@ -996,6 +1005,8 @@ def submit_email_request(
                 f"The email backend returned HTTP {error.code} with an invalid response.",
             )
         if isinstance(body, dict) and isinstance(body.get("message"), str):
+            if error.code == 504:
+                return False, f"{body['message']} (HTTP 504)."
             return False, f"{body['message']} (HTTP {error.code})."
         return False, f"The email backend returned HTTP {error.code}."
     except (TimeoutError, socket.timeout):
