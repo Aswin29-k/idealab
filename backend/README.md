@@ -1,63 +1,44 @@
 # IDEA Lab contact API
 
-## Email provider
+The Node.js backend sends messages from the CARE College of Engineering IDEA
+Lab contact form through the Resend HTTPS API. It exposes `/health` and
+`POST /api/contact`.
 
-The backend sends contact-form and rental-request messages with the Resend
-HTTPS API. It does not use Gmail SMTP. Render may not permit or reliably route
-outbound SMTP on ports 465/587; `/health` performs fixed-target DNS and TCP
-diagnostics for those ports so the backend's actual network results can be
-checked after deployment.
+## Configure email
 
-Before deploying:
+Create a Resend API key with sending access and verify the sender domain. Set
+these variables in the backend environment:
 
-1. Create a Resend account and verify a domain you control. Add the DNS records
-   Resend supplies and wait until the domain status is **Verified**.
-2. Create a Resend API key with **Sending access**, restricted to the verified
-   sender domain when available.
-3. In the Render backend service, set:
+| Variable | Purpose |
+| --- | --- |
+| `RESEND_API_KEY` | Secret Resend sending key |
+| `EMAIL_FROM` | Sender address on the verified domain |
+| `RECEIVER_EMAIL` | Inbox for contact messages |
+| `FRONTEND_ORIGIN` | Comma-separated allowed website origins |
+| `PORT` | Backend port; supplied by Render in production |
+| `TRUST_PROXY` | Set to `1` when running behind a trusted proxy |
 
-   | Variable | Value |
-   | --- | --- |
-   | `NODE_ENV` | `production` |
-   | `FRONTEND_ORIGIN` | `https://idealab-3htc.onrender.com` |
-   | `RESEND_API_KEY` | The secret API key from Resend |
-   | `EMAIL_FROM` | `IDEA Lab <no-reply@your-verified-domain>` |
-   | `RECEIVER_EMAIL` | The inbox that should receive IDEA Lab messages |
-   | `TRUST_PROXY` | `1` |
+Keep the API key in the hosting provider's secret environment settings. Do not
+commit real credentials. `EMAIL_USER` and `EMAIL_PASS` are not used.
 
-   Replace the example sender domain with the exact verified domain. Keep the
-   API key in Render's environment settings; never commit it. `PORT` is
-   supplied by Render. Do not set `EMAIL_USER` or `EMAIL_PASS` for this setup.
+Configure the backend service with `backend` as its root directory,
+`npm install` as its build command, and `npm start` as its start command. Set
+`IDEA_LAB_CONTACT_API_URL` on the Streamlit service to the backend base URL
+without an API path. The local default is `http://127.0.0.1:10000`.
 
-4. Confirm the backend Render service uses `backend` as its Root Directory,
-   `npm install` as its Build Command, and `npm start` as its Start Command.
-   Save the environment variables and deploy/restart the service.
-5. In the Streamlit frontend Render service, confirm
-   `IDEA_LAB_CONTACT_API_URL` is set to
-   `https://idealab-1-a4hj.onrender.com` (the backend base URL, with no API
-   path). Redeploy the frontend to publish its updated timeout guidance.
+## Run locally
 
-## Verify after deployment
+Copy `.env.example` to `.env`, set the Resend variables, then run:
 
-Open `https://idealab-1-a4hj.onrender.com/health`. The response reports
-`emailProvider: "resend"` and changes from `not_configured` to `configured`
-once the required environment variables are present. `configured` does not
-claim that a provider send has succeeded; the status becomes `ready` after a
-confirmed send, or reports an error after a failed send. Health does not make
-an API call or stay in `checking`, so a least-privilege Sending access key
-works without granting permission to list or manage domains. The
-`smtpConnectivity` object reports the backend's DNS result and TCP results
-for Gmail ports 465 and 587; SMTP results are diagnostic only and do not affect
-HTTPS email delivery.
+```powershell
+npm.cmd install
+npm.cmd start
+```
 
-Submit one test message through the existing contact form, then confirm that
-the message appears in the Resend dashboard and reaches `RECEIVER_EMAIL`.
-After an HTTP 504, delivery is uncertain: check the Resend dashboard and
-Render logs before deciding whether to submit again. The backend never retries
-a failed send automatically and uses Resend's `Idempotency-Key` for repeated
-requests with the same submission ID.
+Run the frontend separately from the repository root with
+`py -m streamlit run app.py`. Automated tests use a mocked email provider and
+do not send real messages; run them with `npm test`.
 
-For local development, copy `.env.example` to `.env`, fill in the same provider
-settings, and run `npm install` followed by `npm start` from this directory.
-Do not use a real recipient for automated tests; `npm test` uses a mocked
-provider.
+The `/health` response reports email configuration and transport status. Send a
+test message using the existing contact form and confirm delivery in the Resend
+dashboard and the configured inbox.

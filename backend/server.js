@@ -7,7 +7,7 @@ const dns = require("node:dns");
 const net = require("node:net");
 
 const app = express();
-const port = Number(process.env.PORT || 5000);
+const port = Number(process.env.PORT || 10000);
 const isProduction =
   ["production", "prod"].includes(
     (process.env.NODE_ENV || "").trim().toLowerCase(),
@@ -47,10 +47,15 @@ const emailConfigured = missingEmailConfiguration.length === 0;
 const allowedOrigins = process.env.FRONTEND_ORIGIN
   ? process.env.FRONTEND_ORIGIN.split(",")
       .map((origin) => origin.trim())
+      .map((origin) => origin.replace(/\/+$/, ""))
       .filter(Boolean)
   : isProduction
     ? []
-    : ["http://localhost:8501"];
+    : [
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "https://idealab-3htc.onrender.com",
+      ];
 const submissions = new Map();
 const submissionTtlMs = 24 * 60 * 60 * 1000;
 let emailTransportStatus = emailConfigured ? "configured" : "not_configured";
@@ -272,69 +277,6 @@ function validateContact(body) {
   };
 }
 
-function isIsoDate(value) {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return false;
-  }
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
-function validateRentalRequest(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return { error: "A JSON object is required." };
-  }
-
-  const submissionId =
-    typeof body.submissionId === "string" &&
-    /^[a-f0-9]{32}$/i.test(body.submissionId)
-      ? body.submissionId
-      : null;
-  const name = cleanText(body.name, 120, true);
-  const department = cleanText(body.department, 160, true);
-  const contact = cleanText(body.contact, 254, true);
-  const item = cleanText(body.item, 160, true);
-  const purpose = cleanText(body.purpose, 3000, true, true);
-
-  if (!submissionId) {
-    return { error: "A valid submission identifier is required." };
-  }
-  if (!name || !department || !contact || !item || !purpose) {
-    return {
-      error:
-        "Name, department, contact details, requested component, and purpose are required.",
-    };
-  }
-  if (
-    typeof body.quantity !== "number" ||
-    !Number.isInteger(body.quantity) ||
-    body.quantity < 1 ||
-    body.quantity > 1000
-  ) {
-    return { error: "Quantity must be a whole number between 1 and 1000." };
-  }
-  if (!isIsoDate(body.requiredDate) || !isIsoDate(body.returnDate)) {
-    return { error: "Enter valid required and return dates." };
-  }
-  if (body.returnDate <= body.requiredDate) {
-    return { error: "The return date must be later than the required date." };
-  }
-
-  return {
-    value: {
-      submissionId,
-      name,
-      department,
-      contact,
-      item,
-      quantity: body.quantity,
-      requiredDate: body.requiredDate,
-      returnDate: body.returnDate,
-      purpose,
-    },
-  };
-}
-
 function pruneSubmissions(now) {
   for (const [id, entry] of submissions) {
     if (entry.expiresAt <= now) {
@@ -398,32 +340,6 @@ async function sendContactEmail(contact, submissionId) {
       "",
       "Message:",
       contact.message,
-    ].join("\n"),
-  });
-}
-
-async function sendRentalRequestEmail(rentalRequest, submissionId) {
-  const timestamp = new Date().toISOString();
-  await sendProviderEmail(`rental-request/${submissionId}`, {
-    from: emailFrom,
-    to: [receiverEmail],
-    subject: `IDEA Lab rental request: ${rentalRequest.item}`,
-    text: [
-      "A component or machine rental request was submitted through the IDEA Lab website.",
-      "",
-      `Timestamp: ${timestamp}`,
-      `Name: ${rentalRequest.name}`,
-      `Department: ${rentalRequest.department}`,
-      `Contact details: ${rentalRequest.contact}`,
-      `Component or machine: ${rentalRequest.item}`,
-      `Quantity requested: ${rentalRequest.quantity}`,
-      `Required date: ${rentalRequest.requiredDate}`,
-      `Return date: ${rentalRequest.returnDate}`,
-      "",
-      "Purpose:",
-      rentalRequest.purpose,
-      "",
-      "This request is pending administrator confirmation. Availability is not confirmed.",
     ].join("\n"),
   });
 }
@@ -527,72 +443,6 @@ app.post("/api/contact", contactRateLimit, async (request, response) => {
       message: timedOut
         ? "The email provider did not confirm the message before timing out. Delivery is uncertain, so this submission will not be retried automatically. Check the Resend dashboard and Render backend logs before deciding whether to submit again."
         : "The email provider could not accept the message. Please try again later.",
-    });
-  }
-});
-
-app.post("/api/rental-request", contactRateLimit, async (request, response) => {
-  const validated = validateRentalRequest(request.body);
-  if (validated.error) {
-    response.status(400).json({ ok: false, message: validated.error });
-    return;
-  }
-  if (!emailConfigured) {
-    response.status(503).json({
-      ok: false,
-      message: `Rental request email is unavailable. Configure valid backend variable(s): ${missingEmailConfiguration.join(", ")}.`,
-      missingConfiguration: missingEmailConfiguration,
-    });
-    return;
-  }
-  if (emailTransportStatus === "authentication_failed") {
-    response.status(503).json({
-      ok: false,
-      message:
-        "The email provider rejected the server credentials. The site administrator must update the backend email settings.",
-    });
-    return;
-  }
-
-  try {
-    await sendEmailOnce(
-      `rental-request/${validated.value.submissionId}`,
-      () =>
-        sendRentalRequestEmail(
-          validated.value,
-          validated.value.submissionId,
-        ),
-    );
-    emailTransportStatus = "ready";
-    emailTransportFailureCode = null;
-    emailTransportFailureStage = null;
-    response.status(200).json({
-      ok: true,
-      message:
-        "Your request email was accepted by the email provider. The request is pending administrator confirmation; availability is not confirmed.",
-    });
-  } catch (error) {
-    logMailTransportFailure("rental request send", error);
-    emailTransportStatus = isEmailAuthenticationFailure(error)
-      ? "authentication_failed"
-      : "unavailable";
-    emailTransportFailureCode =
-      typeof error?.code === "string" ? error.code : "unknown";
-    emailTransportFailureStage = "send";
-    if (isEmailAuthenticationFailure(error)) {
-      response.status(503).json({
-        ok: false,
-        message:
-          "The email provider rejected the server credentials. The site administrator must update the backend email settings.",
-      });
-      return;
-    }
-    const timedOut = isEmailTimeoutFailure(error);
-    response.status(timedOut ? 504 : 502).json({
-      ok: false,
-      message: timedOut
-        ? "The email provider did not confirm the request before timing out. Delivery is uncertain, so this submission will not be retried automatically. Check the Resend dashboard and Render backend logs before deciding whether to submit again."
-        : "The email provider could not accept the request. Please try again later.",
     });
   }
 });

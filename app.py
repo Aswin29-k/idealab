@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
-from datetime import date, timedelta
 from html import escape
 from http.client import HTTPException
 from pathlib import Path
@@ -13,8 +13,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from dotenv import load_dotenv
 import streamlit as st
 
+logger = logging.getLogger(__name__)
+load_dotenv(Path(__file__).parent / ".env")
 
 st.set_page_config(
     page_title="AICTE IDEA Lab | CARE College of Engineering",
@@ -25,9 +28,8 @@ st.set_page_config(
 NAV_ITEMS = (
     "Home",
     "Mission & Vision",
-    "Components List",
     "Programs",
-    "Components Rental",
+    "Projects",
     "Machinery",
     "Contact",
 )
@@ -178,6 +180,35 @@ ACTIVITIES = (
         "Once a year",
     ),
 )
+PROJECT_CATEGORIES = (
+    (
+        "Industry Projects",
+        (
+            "RANE Brake Lining Pvt. Ltd. – Project 1",
+            "RANE Brake Lining Pvt. Ltd. – Project 2",
+            "Kumar Industries",
+            "Veers",
+        ),
+    ),
+    (
+        "Home & Domestic Projects",
+        (
+            "Mopper",
+            "Paste Dispensing Toothbrush",
+            "Grass Cutter Attachment",
+            "Mechanical Grass Cutter",
+            "Chennai Home Cleaning Service Project",
+        ),
+    ),
+    (
+        "Smart Technology Projects",
+        ("Smart Human Detection System",),
+    ),
+    (
+        "Environmental & Cleaning Projects",
+        ("Kerb Cleaner", "Lake Cleaner"),
+    ),
+)
 EQUIPMENT = (
     (
         "PCB Milling Machine",
@@ -218,16 +249,6 @@ EQUIPMENT = (
         "milling operations.",
     ),
 )
-
-
-def render_empty_state(title: str, message: str) -> None:
-    with st.container(border=True):
-        st.subheader(title)
-        st.write(message)
-        st.caption(
-            "No sample inventory, program, or machine records are shown as real lab data."
-        )
-
 
 def render_home() -> None:
     hero_left, hero_right = st.columns([1.15, 0.85], vertical_alignment="center")
@@ -325,7 +346,6 @@ def render_home() -> None:
                 st.markdown(f":material/mail: [{email}](mailto:{email})")
                 st.markdown(f":material/call: [{phone}](tel:{phone})")
 
-
 def render_mission_vision() -> None:
     st.title("Mission & Vision")
     st.write("A shared purpose for hands-on learning and meaningful innovation.")
@@ -360,33 +380,6 @@ def render_mission_vision() -> None:
         with column.container(border=True, height="stretch"):
             st.subheader(heading, icon=icon)
             st.write(description)
-
-
-def render_components() -> None:
-    st.title("Components list")
-    st.write("Browse verified electronic components and their current availability.")
-    search_col, category_col = st.columns([2, 1], vertical_alignment="bottom")
-    with search_col:
-        st.text_input(
-            "Search components",
-            placeholder="Search by component name",
-            type="search",
-            key="component_search",
-        )
-    with category_col:
-        st.selectbox(
-            "Category",
-            ["No categories available"],
-            key="component_category",
-            disabled=True,
-        )
-    render_empty_state(
-        "Component data is not connected",
-        "No existing Google Sheets integration or verified component inventory "
-        "was present in the supplied project. Configure the existing data source "
-        "before publishing component names, photos, quantities, or availability.",
-    )
-
 
 def render_programs() -> None:
     st.title("Programs")
@@ -657,121 +650,96 @@ def render_programs() -> None:
         unsafe_allow_html=True,
     )
 
-
-def render_rental() -> None:
-    st.title("Components rental")
-    st.write(
-        "Review availability and submit a request for a lab component or machine."
-    )
-    st.warning(
-        "Google Sheets inventory is not configured, so component names, quantities, "
-        "and availability cannot be verified here. You can still email a request; "
-        "all requests remain pending administrator confirmation.",
-        icon=":material/warning:",
-    )
-    st.subheader("Google Sheets inventory")
-    st.info(
-        "No Google Sheets inventory integration is configured. No stock or rental "
-        "status is displayed, and submitting a request does not reserve an item."
-    )
-
-    st.subheader("Rental request")
-    if "rental_flash_success" in st.session_state:
-        st.success(st.session_state.pop("rental_flash_success"))
-    st.session_state.setdefault("rental_form_version", 0)
-    form_version = st.session_state["rental_form_version"]
-    submission_id_key = f"rental_submission_id_{form_version}"
-    st.session_state.setdefault(submission_id_key, uuid4().hex)
-
-    with st.form(f"rental_request_{form_version}", border=True):
-        name = st.text_input(
-            "Student or staff name", key=f"rental_name_{form_version}"
-        )
-        department = st.text_input(
-            "Department", key=f"rental_department_{form_version}"
-        )
-        contact = st.text_input(
-            "Contact details (email or phone)", key=f"rental_contact_{form_version}"
-        )
-        item = st.text_input(
-            "Component or machine required",
-            key=f"rental_item_{form_version}",
-        )
-        quantity = st.number_input(
-            "Quantity",
-            min_value=1,
-            step=1,
-            value=1,
-            key=f"rental_quantity_{form_version}",
-        )
-        required_date = st.date_input(
-            "Required date",
-            value=date.today(),
-            key=f"rental_required_date_{form_version}",
-        )
-        return_date = st.date_input(
-            "Return date",
-            value=date.today() + timedelta(days=1),
-            key=f"rental_return_date_{form_version}",
-        )
-        purpose = st.text_area(
-            "Purpose of rental", key=f"rental_purpose_{form_version}"
-        )
-        submitted = st.form_submit_button(
-            "Submit rental request",
-            type="primary",
-            icon=":material/send:",
+def render_projects() -> None:
+    st.title("Projects")
+    st.write("Browse projects by name or category.")
+    search_col, category_col = st.columns([1.4, 1], vertical_alignment="bottom")
+    with search_col:
+        search = st.text_input(
+            "Search projects",
+            placeholder="Search by project name",
+            type="search",
+            key="project_search",
+        ).strip().casefold()
+    categories = [category for category, _ in PROJECT_CATEGORIES]
+    with category_col:
+        selected_category = st.selectbox(
+            "Filter by category",
+            ["All Projects", *categories],
+            key="project_category",
         )
 
-    if submitted:
-        missing = [
-            field
-            for field, value in (
-                ("student or staff name", name),
-                ("department", department),
-                ("contact details", contact),
-                ("component or machine required", item),
-                ("purpose of rental", purpose),
-            )
-            if not value.strip()
+    matching_projects = {
+        category: [
+            name for name in projects if not search or search in name.casefold()
         ]
-        if missing:
-            st.error("Please complete the required fields: " + ", ".join(missing) + ".")
-        elif return_date <= required_date:
-            st.error("The return date must be later than the required date.")
-        elif quantity < 1:
-            st.error("Quantity must be at least one.")
-        elif st.session_state.get("rental_submission_in_progress", False):
-            st.warning("Your request is already being sent. Please wait.")
-        else:
-            st.session_state["rental_submission_in_progress"] = True
-            with st.spinner("Sending your request..."):
-                try:
-                    accepted, result_message = submit_email_request(
-                        {
-                            "submissionId": st.session_state[submission_id_key],
-                            "name": name,
-                            "department": department,
-                            "contact": contact,
-                            "item": item,
-                            "quantity": int(quantity),
-                            "requiredDate": required_date.isoformat(),
-                            "returnDate": return_date.isoformat(),
-                            "purpose": purpose,
-                        },
-                        "/api/rental-request",
-                        "Rental request",
+        for category, projects in PROJECT_CATEGORIES
+        if selected_category == "All Projects" or category == selected_category
+    }
+    if not any(matching_projects.values()):
+        st.info("No projects match your search.")
+        return
+
+    for category, projects in matching_projects.items():
+        if not projects:
+            continue
+        st.header(category)
+        for row_start in range(0, len(projects), 3):
+            columns = st.columns(3)
+            for column, name in zip(columns, projects[row_start : row_start + 3]):
+                card_key = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+                with column.container(
+                    border=True,
+                    height="stretch",
+                    key=f"project-card-{card_key}",
+                ):
+                    st.markdown(
+                        "<div class='project-image-placeholder' role='img' "
+                        "aria-label='Project image coming soon'>"
+                        "Project image coming soon</div>",
+                        unsafe_allow_html=True,
                     )
-                finally:
-                    st.session_state["rental_submission_in_progress"] = False
+                    st.subheader(name)
+                    with st.expander("View Details"):
+                        st.caption("Details Coming Soon")
 
-            if accepted:
-                st.session_state["rental_flash_success"] = result_message
-                st.session_state["rental_form_version"] = form_version + 1
-                st.rerun()
-            else:
-                st.error(result_message)
-
+def _log_backend_failure(
+    api_base_url: str,
+    method: str,
+    category: str,
+    status: int | None = None,
+    detail: str | None = None,
+) -> None:
+    hostname = urlparse(api_base_url).hostname or "invalid"
+    safe_detail = ""
+    if detail and not (
+        os.environ.get("RENDER", "").strip().lower() == "true"
+        or bool(os.environ.get("RENDER_EXTERNAL_URL", "").strip())
+        or os.environ.get("NODE_ENV", "").strip().lower() == "production"
+        or os.environ.get("APP_ENV", "").strip().lower()
+        in {"prod", "production"}
+    ):
+        safe_detail = re.sub(
+            r"(private[_ -]?key|client[_ -]?secret|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[\"']?[^,\s\"']+",
+            r"\1=[REDACTED]",
+            detail,
+            flags=re.IGNORECASE,
+        )
+        safe_detail = re.sub(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            "[REDACTED PRIVATE KEY]",
+            safe_detail,
+            flags=re.IGNORECASE,
+        )[:300]
+    logger.warning(
+        "IDEA Lab backend request failed "
+        "(host=%s method=%s category=%s status=%s detail=%s).",
+        hostname,
+        method,
+        category,
+        status if status is not None else "-",
+        safe_detail or "-",
+    )
 
 def render_machinery() -> None:
     st.title("List of Equipments")
@@ -794,7 +762,6 @@ def render_machinery() -> None:
         with st.container(border=True):
             st.subheader(name)
             st.write(description)
-
 
 def render_contact() -> None:
     st.title("Contact")
@@ -888,39 +855,35 @@ def render_contact() -> None:
             else:
                 st.error(result_message)
 
-
 def resolve_api_base_url() -> str:
     raw_url = os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip()
     if not raw_url:
-        return "http://localhost:5000"
+        is_production = (
+            os.environ.get("RENDER", "").strip().lower() == "true"
+            or bool(os.environ.get("RENDER_EXTERNAL_URL", "").strip())
+            or os.environ.get("NODE_ENV", "").strip().lower() == "production"
+            or os.environ.get("APP_ENV", "").strip().lower()
+            in {"prod", "production"}
+        )
+        if is_production:
+            return "https://idealab-1-a4hj.onrender.com"
+        return "http://127.0.0.1:10000"
 
     normalized = raw_url.rstrip("/")
-    for suffix in ("/api/contact", "/api/rental-request", "/api"):
+    for suffix in (
+        "/api/contact",
+        "/api",
+        "/health",
+    ):
         if normalized.lower().endswith(suffix.lower()):
             normalized = normalized[: -len(suffix)]
             break
     return normalized
 
-
 def submit_email_request(
     payload: dict[str, object], endpoint: str, request_label: str
 ) -> tuple[bool, str]:
-    is_production = (
-        os.environ.get("RENDER", "").strip().lower() == "true"
-        or bool(os.environ.get("RENDER_EXTERNAL_URL", "").strip())
-        or os.environ.get("NODE_ENV", "").strip().lower() == "production"
-        or os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}
-    )
     api_base_url = resolve_api_base_url()
-    if not os.environ.get("IDEA_LAB_CONTACT_API_URL", "").strip():
-        if is_production:
-            return (
-                False,
-                f"{request_label} not sent: IDEA_LAB_CONTACT_API_URL is not set. "
-                "Configure it in the Streamlit frontend service with the public "
-                "base URL of your deployed email backend (for example, "
-                "https://your-render-service.onrender.com). Do not include /api/contact.",
-            )
 
     full_url = f"{api_base_url}{endpoint}"
     parsed_base_url = urlparse(api_base_url)
@@ -970,6 +933,7 @@ def submit_email_request(
         try:
             body = json.loads(response_body)
         except json.JSONDecodeError:
+            _log_backend_failure(api_base_url, "POST", "http_error", error.code)
             if error.code == 405:
                 return (
                     False,
@@ -1000,16 +964,69 @@ def submit_email_request(
                     "The email backend returned HTTP 500. No message was confirmed; "
                     "check the backend logs.",
                 )
+            if error.code == 403:
+                return (
+                    False,
+                    "The backend rejected the request. Check that the website origin "
+                    "is allowed by the backend.",
+                )
+            if error.code == 404:
+                return (
+                    False,
+                    "The backend is reachable, but the requested API route was not "
+                    "found. Confirm the backend URL and deploy the updated Node service.",
+                )
+            if error.code == 503:
+                return (
+                    False,
+                    "The backend returned HTTP 503. Check its configuration and service logs.",
+                )
             return (
                 False,
                 f"The email backend returned HTTP {error.code} with an invalid response.",
             )
+        cors_rejected = (
+            error.code == 403
+            and isinstance(body, dict)
+            and isinstance(body.get("message"), str)
+            and "origin" in body["message"].casefold()
+        )
+        _log_backend_failure(
+            api_base_url,
+            "POST",
+            "cors_rejected" if cors_rejected else "http_error",
+            error.code,
+        )
+        if cors_rejected:
+            return (
+                False,
+                "The backend rejected this frontend origin. Add the exact website "
+                "origin to the backend FRONTEND_ORIGIN setting and redeploy.",
+            )
         if isinstance(body, dict) and isinstance(body.get("message"), str):
             if error.code == 504:
                 return False, f"{body['message']} (HTTP 504)."
+            if error.code == 404:
+                return (
+                    False,
+                    "The backend is reachable, but the requested API route was not "
+                    "found. Confirm the backend URL and deploy the updated Node service.",
+                )
+            if error.code == 502:
+                return (
+                    False,
+                    "The backend gateway returned HTTP 502. Check whether the "
+                    "backend is starting, unavailable, or reporting a crash.",
+                )
+            if error.code == 503:
+                return (
+                    False,
+                    f"{body['message']} (HTTP 503). Check backend configuration and logs.",
+                )
             return False, f"{body['message']} (HTTP {error.code})."
         return False, f"The email backend returned HTTP {error.code}."
     except (TimeoutError, socket.timeout):
+        _log_backend_failure(api_base_url, "POST", "timeout")
         return (
             False,
             f"{request_label} timed out while waiting for the email backend. "
@@ -1018,14 +1035,14 @@ def submit_email_request(
         )
     except URLError as error:
         if isinstance(error.reason, ConnectionRefusedError):
+            _log_backend_failure(api_base_url, "POST", "connection_refused")
             return (
                 False,
-                "The email backend refused the connection at the configured API "
-                "address. Start the Node.js backend with `cd backend; npm.cmd start`. "
-                "For a deployed site, set IDEA_LAB_CONTACT_API_URL to a backend URL "
-                "reachable from the Streamlit server.",
+                "No backend is listening at the configured local address. Start "
+                "the Node.js backend with `cd backend; npm.cmd start`.",
             )
         if isinstance(error.reason, (TimeoutError, socket.timeout)):
+            _log_backend_failure(api_base_url, "POST", "timeout")
             return (
                 False,
                 "The email backend could not be reached before the connection "
@@ -1033,28 +1050,33 @@ def submit_email_request(
                 "IDEA_LAB_CONTACT_API_URL is reachable from the Streamlit server.",
             )
         if isinstance(error.reason, OSError):
+            _log_backend_failure(api_base_url, "POST", "network")
             return (
                 False,
                 "A network error prevented a connection to the email backend. "
                 "Check its address and confirm it is reachable from the Streamlit server.",
             )
+        _log_backend_failure(api_base_url, "POST", "network")
         return (
             False,
             "The email backend could not be reached. Check that it is running and "
             "that IDEA_LAB_CONTACT_API_URL is reachable from the Streamlit server.",
         )
     except HTTPException:
+        _log_backend_failure(api_base_url, "POST", "incomplete_response")
         return (
             False,
             f"{request_label} not confirmed: the email backend returned an incomplete response.",
         )
     except OSError:
+        _log_backend_failure(api_base_url, "POST", "network")
         return (
             False,
             f"{request_label} not confirmed because the email backend connection failed. "
             "Check the backend URL and Render logs.",
         )
     except UnicodeDecodeError:
+        _log_backend_failure(api_base_url, "POST", "invalid_response")
         return (
             False,
             f"{request_label} not sent: the email service returned an invalid response.",
@@ -1063,6 +1085,7 @@ def submit_email_request(
     try:
         body = json.loads(response_body)
     except json.JSONDecodeError:
+        _log_backend_failure(api_base_url, "POST", "invalid_json")
         return (
             False,
             f"{request_label} not sent: the email service returned an invalid response.",
@@ -1074,7 +1097,6 @@ def submit_email_request(
     if isinstance(body, dict) and isinstance(body.get("message"), str):
         return False, body["message"]
     return False, f"{request_label} not sent: the email service returned an error."
-
 
 st.markdown(
     """
@@ -1279,7 +1301,12 @@ st.markdown(
     }
     .st-key-main_navigation [role="radiogroup"] {
         gap: 0.4rem;
-        flex-wrap: wrap;
+        display: flex;
+        flex-wrap: wrap !important;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
     }
     .st-key-main_navigation [role="radio"] {
         border: 1px solid var(--idea-border);
@@ -1298,6 +1325,43 @@ st.markdown(
         border-color: var(--idea-navy);
         background: linear-gradient(110deg, var(--idea-navy), var(--idea-blue));
         color: var(--idea-white);
+    }
+    @media (max-width: 768px) {
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            box-sizing: border-box;
+            flex: 1 1 100% !important;
+            width: 100% !important;
+            min-width: 100% !important;
+        }
+        .st-key-main_navigation [role="radio"] {
+            flex: 0 1 auto;
+            min-width: 0;
+            white-space: normal;
+        }
+    }
+    div[class*="st-key-project-card-"] {
+        transition: transform 160ms ease, box-shadow 160ms ease;
+    }
+    .project-image-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        aspect-ratio: 16 / 9;
+        margin-bottom: 0.75rem;
+        border-radius: 0.75rem;
+        background: linear-gradient(135deg, var(--idea-light-blue), var(--idea-border));
+        color: var(--idea-muted);
+        font-weight: 600;
+        text-align: center;
+    }
+    @media (hover: hover) {
+        div[class*="st-key-project-card-"]:hover {
+            box-shadow: 0 8px 24px rgba(18, 59, 99, 0.14);
+            transform: translateY(-3px);
+        }
     }
     </style>
     """,
@@ -1329,12 +1393,10 @@ if selected_page == "Home":
     render_home()
 elif selected_page == "Mission & Vision":
     render_mission_vision()
-elif selected_page == "Components List":
-    render_components()
 elif selected_page == "Programs":
     render_programs()
-elif selected_page == "Components Rental":
-    render_rental()
+elif selected_page == "Projects":
+    render_projects()
 elif selected_page == "Machinery":
     render_machinery()
 elif selected_page == "Contact":

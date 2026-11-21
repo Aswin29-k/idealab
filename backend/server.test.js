@@ -14,7 +14,6 @@ const mockPath = path.join(
   "test-support",
   "mock-email-provider.js",
 );
-
 async function unusedPort() {
   const server = net.createServer();
   await new Promise((resolve, reject) => {
@@ -34,23 +33,28 @@ async function startBackend(mode) {
     path.join(os.tmpdir(), "idealab-contact-api-test-"),
   );
   const sendCountPath = path.join(temporaryDirectory, "send-count.txt");
-  const child = spawn(process.execPath, ["--require", mockPath, serverPath], {
-    cwd: backendDirectory,
-    env: {
-      ...process.env,
-      PORT: String(port),
-      NODE_ENV: "test",
-      RENDER: "false",
-      APP_ENV: "test",
-      FRONTEND_ORIGIN: "http://localhost:8501",
-      RESEND_API_KEY: "re_test-key",
-      EMAIL_FROM: "IDEA Lab <sender@mock.test>",
-      RECEIVER_EMAIL: "test-receiver@mock.test",
-      TEST_PROVIDER_MODE: mode,
-      TEST_PROVIDER_SEND_COUNT: sendCountPath,
+  const child = spawn(
+    process.execPath,
+    ["--require", mockPath, serverPath],
+    {
+      cwd: backendDirectory,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        NODE_ENV: "test",
+        RENDER: "false",
+        APP_ENV: "test",
+        FRONTEND_ORIGIN:
+          "http://localhost:8501, http://127.0.0.1:8501/, https://idealab-3htc.onrender.com",
+        RESEND_API_KEY: "re_test-key",
+        EMAIL_FROM: "IDEA Lab <sender@mock.test>",
+        RECEIVER_EMAIL: "test-receiver@mock.test",
+        TEST_PROVIDER_MODE: mode,
+        TEST_PROVIDER_SEND_COUNT: sendCountPath,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
     },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  );
 
   let output = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => (output += chunk));
@@ -135,6 +139,23 @@ test("health endpoint returns immediately without claiming an unverified provide
     await backend.close();
   }
 });
+test("removed integration and staff endpoints are not exposed", async () => {
+  const backend = await startBackend("success");
+  try {
+    for (const [path, method] of [
+      ["/api/auth/admin-check", "GET"],
+      ["/api/components", "GET"],
+      ["/api/staff/transactions", "GET"],
+      ["/api/rental-request", "POST"],
+    ]) {
+      const response = await fetch(`${backend.baseUrl}${path}`, { method });
+      assert.equal(response.status, 404);
+      assert.equal((await response.json()).ok, false);
+    }
+  } finally {
+    await backend.close();
+  }
+});
 
 test("contact endpoint preserves email content and uses provider idempotency", async () => {
   const backend = await startBackend("success");
@@ -151,40 +172,6 @@ test("contact endpoint preserves email content and uses provider idempotency", a
     assert.equal(sent.body.reply_to, "sender@mock.test");
     assert.equal(sent.body.subject, "IDEA Lab contact: Automated contact test");
     assert.match(sent.body.text, /This message is sent only to a mocked SMTP transport\./);
-  } finally {
-    await backend.close();
-  }
-});
-
-test("rental requests retain their email content and use a distinct idempotency key", async () => {
-  const backend = await startBackend("success");
-  try {
-    const response = await fetch(`${backend.baseUrl}/api/rental-request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        submissionId: "abcdef1234567890abcdef1234567890",
-        name: "Test Renter",
-        department: "Engineering",
-        contact: "renter@mock.test",
-        item: "Oscilloscope",
-        quantity: 2,
-        requiredDate: "2030-01-10",
-        returnDate: "2030-01-12",
-        purpose: "Test rental request message.",
-      }),
-    });
-    assert.equal(response.status, 200);
-    const sent = JSON.parse(
-      fs.readFileSync(backend.sendCountPath, "utf8").trim(),
-    );
-    assert.equal(
-      sent.idempotencyKey,
-      "rental-request/abcdef1234567890abcdef1234567890",
-    );
-    assert.equal(sent.body.subject, "IDEA Lab rental request: Oscilloscope");
-    assert.match(sent.body.text, /Test rental request message\./);
-    assert.match(sent.body.text, /pending administrator confirmation/);
   } finally {
     await backend.close();
   }
